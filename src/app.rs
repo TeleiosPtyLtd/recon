@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::session::{self, Session};
+use crate::paint;
+use crate::session::{self, Session, SessionStatus};
 use crate::tmux;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,6 +26,7 @@ pub struct App {
     pub filter_text: String,              // current search query
     pub filter_cursor: usize,             // cursor position in query
     prev_sessions: HashMap<String, Session>,
+    last_painted: HashMap<String, SessionStatus>,
 }
 
 impl App {
@@ -43,6 +45,7 @@ impl App {
             filter_text: String::new(),
             filter_cursor: 0,
             prev_sessions: HashMap::new(),
+            last_painted: HashMap::new(),
         }
     }
 
@@ -56,6 +59,21 @@ impl App {
             .iter()
             .map(|s| (s.session_id.clone(), s.clone()))
             .collect();
+
+        for s in &sessions {
+            let Some(pane) = s.pane_target.as_deref() else { continue };
+            let changed = self
+                .last_painted
+                .get(pane)
+                .map_or(true, |prev| prev != &s.status);
+            if changed {
+                paint::paint_pane(pane, &s.status);
+                self.last_painted.insert(pane.to_string(), s.status.clone());
+            }
+        }
+        let live: std::collections::HashSet<&str> =
+            sessions.iter().filter_map(|s| s.pane_target.as_deref()).collect();
+        self.last_painted.retain(|k, _| live.contains(k.as_str()));
 
         self.sessions = sessions;
 
@@ -175,6 +193,19 @@ impl App {
                         if let Some(name) = &session.tmux_session {
                             tmux::kill_session(name);
                             self.refresh();
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let n = (c as usize) - ('1' as usize);
+                let indices = self.filtered_indices();
+                if let Some(&real_idx) = indices.get(n) {
+                    self.selected = n;
+                    if let Some(session) = self.sessions.get(real_idx) {
+                        if let Some(target) = &session.pane_target {
+                            tmux::switch_to_pane(target);
+                            self.should_quit = true;
                         }
                     }
                 }

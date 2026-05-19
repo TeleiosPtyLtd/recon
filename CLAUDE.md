@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build                    # Debug build
 cargo install --path .         # Install to ~/.cargo/bin/recon
-./tests/e2e_states.sh          # E2E tests (creates real tmux sessions with claude)
+./tests/e2e.sh                 # E2E tests (creates real tmux sessions with claude)
 ```
 
 The e2e tests require `jq`, `claude`, and a running tmux server. They create sessions with random IDs (`e2e-{RID}-*`) and clean up via trap on exit. Tests take ~2 minutes (waiting for claude to respond).
@@ -45,12 +45,17 @@ Process-to-session matching uses `~/.claude/sessions/{PID}.json` files written b
 
 ### Module roles
 
-- **session.rs** — all discovery, parsing, and status logic (~660 lines, the core)
+- **session.rs** — all discovery, parsing, and status logic (the core, ~1300 lines)
 - **app.rs** — state container, refresh loop, key handling, JSON serialization
-- **ui.rs** — ratatui rendering (table, status dots, color coding)
+- **ui.rs** — ratatui rendering for table view (status dots, color coding)
+- **view_ui.rs** — Tamagotchi view rendering: pixel-art creatures, rooms grouped by git repo, zoom/page
 - **tmux.rs** — session creation, switching, name sanitization
 - **model.rs** — model ID → display name/context window mapping
 - **new_session.rs** — interactive two-field form for creating sessions
+- **history.rs** — past-session browser (resume from `~/.claude/projects/*/*.jsonl`)
+- **park.rs** — "park" / detach handling for sessions
+- **cli.rs** — argument parsing (`recon`, `recon view`, etc.)
+- **main.rs** — entry point, event loop wiring
 
 ### Key caches
 

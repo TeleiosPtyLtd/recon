@@ -2,9 +2,13 @@ mod app;
 mod cli;
 mod history;
 mod model;
+mod flow;
+mod flow_test;
 mod new_session;
+mod paint;
 mod park;
 mod session;
+mod single_instance;
 mod tmux;
 mod ui;
 mod view_ui;
@@ -101,6 +105,33 @@ fn main() -> io::Result<()> {
         Some(Command::Unpark) => {
             park::unpark();
         }
+        Some(Command::PaintTest { cleanup }) => {
+            if cleanup {
+                paint::test_cleanup();
+            } else {
+                paint::test_setup();
+            }
+        }
+        Some(Command::Flow { slots, action }) => {
+            match action {
+                None => flow::run(slots),
+                Some(cli::FlowAction::Status) => flow::status(),
+                Some(cli::FlowAction::Stop { force }) => flow::stop(force),
+            }
+        }
+        Some(Command::FlowTest { cleanup, count, auto }) => {
+            if cleanup {
+                flow_test::cleanup();
+            } else {
+                flow_test::run(count, auto);
+            }
+        }
+        Some(Command::FlowOrchestrator { master, slots }) => {
+            flow::run_orchestrator(&master, slots);
+        }
+        Some(Command::FlowTestCycle { dir }) => {
+            flow_test::run_cycler(&dir);
+        }
         Some(Command::View) | None => {
             let start_mode = if matches!(cli.command, Some(Command::View)) {
                 ViewMode::View
@@ -115,6 +146,15 @@ fn main() -> io::Result<()> {
 }
 
 fn run_tui(start_mode: ViewMode) -> io::Result<()> {
+    let _lock = match single_instance::acquire() {
+        Ok(l) => l,
+        Err(_) => {
+            eprintln!("Another recon dashboard is already running.");
+            eprintln!("Quit that one first, or attach to it with: tmux attach -t recon-flow");
+            std::process::exit(1);
+        }
+    };
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -139,7 +179,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, start_mode: Vi
     app.view_mode = start_mode;
     app.refresh();
 
-    let refresh_interval = Duration::from_secs(2);
+    let refresh_interval = Duration::from_millis(200);
     let mut last_refresh = Instant::now();
 
     loop {

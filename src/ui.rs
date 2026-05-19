@@ -48,7 +48,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .style(
         Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::Rgb(0x8A, 0x84, 0x7A))
             .add_modifier(Modifier::BOLD),
     );
 
@@ -65,12 +65,12 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 .as_deref()
                 .unwrap_or("—");
 
-            // Status: colored dot + label
+            // Status: shape + label + color (layered encoding — don't rely on color alone)
             let (status_dot, status_label, status_color) = match session.status {
-                SessionStatus::New => ("●", "New", Color::Blue),
-                SessionStatus::Working => ("●", "Working", Color::Green),
-                SessionStatus::Idle => ("●", "Idle", Color::DarkGray),
-                SessionStatus::Input => ("●", "Input", Color::Yellow),
+                SessionStatus::New     => ("○", "New",     Color::Rgb(0x3D, 0x47, 0x59)),
+                SessionStatus::Working => ("●", "Working", Color::Rgb(0x4A, 0x55, 0x68)),
+                SessionStatus::Idle    => ("●", "Idle",    Color::Gray),
+                SessionStatus::Input   => ("▲", "Input",   Color::Rgb(0xDD, 0x6B, 0x20)),
             };
 
             let token_ratio = session.token_ratio();
@@ -95,11 +95,11 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 let mut spans = vec![Span::raw(&session.project_name)];
                 if let Some(dir) = &session.relative_dir {
                     spans.push(Span::styled("::", Style::default().fg(Color::DarkGray)));
-                    spans.push(Span::styled(dir.clone(), Style::default().fg(Color::Cyan)));
+                    spans.push(Span::raw(dir.clone()));
                 }
                 if let Some(b) = &session.branch {
                     spans.push(Span::styled("::", Style::default().fg(Color::DarkGray)));
-                    spans.push(Span::styled(b, Style::default().fg(Color::Green)));
+                    spans.push(Span::styled(b, Style::default().fg(Color::Rgb(0x9A, 0x94, 0x8A))));
                 }
                 Cell::from(Line::from(spans))
             };
@@ -128,10 +128,12 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 Cell::from(activity),
             ]);
 
+            // Row tint matches the tmux pane paint so the dashboard and the
+            // panes you're switching between speak the same visual language.
             if session.status == SessionStatus::Input {
-                row.style(Style::default().bg(Color::Rgb(50, 40, 0)))
+                row.style(Style::default().bg(Color::Rgb(0x2D, 0x1F, 0x10)))
             } else if display_idx == app.selected {
-                row.style(Style::default().bg(Color::DarkGray))
+                row.style(Style::default().bg(Color::Rgb(0x2E, 0x31, 0x48)))
             } else {
                 row
             }
@@ -162,7 +164,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
-        Span::styled("/", Style::default().fg(Color::Cyan)),
+        Span::styled("/", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
         Span::raw(&app.filter_text),
     ];
     if !app.filter_active && !app.filter_text.is_empty() {
@@ -183,28 +185,30 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let spans = if app.filter_active {
         vec![
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::styled("Esc", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" clear  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" keep filter  "),
-            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::styled("j/k", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" navigate"),
         ]
     } else {
         vec![
-            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::styled("j/k", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" navigate  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::styled("1-9", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
+            Span::raw(" jump  "),
+            Span::styled("Enter", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" switch  "),
-            Span::styled("x", Style::default().fg(Color::Cyan)),
+            Span::styled("x", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" kill  "),
-            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::styled("/", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" search  "),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::styled("v", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" view  "),
-            Span::styled("i", Style::default().fg(Color::Cyan)),
+            Span::styled("i", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" next input  "),
-            Span::styled("q", Style::default().fg(Color::Cyan)),
+            Span::styled("q", Style::default().fg(Color::Rgb(0xB0, 0xA8, 0x98))),
             Span::raw(" quit"),
         ]
     };
