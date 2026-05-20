@@ -68,8 +68,10 @@ pub enum Command {
     /// needing attention (Idle/Input) and demotes them once Working for 5s+.
     /// Without a subcommand, starts (or attaches to) recon-flow.
     Flow {
-        /// Max auto-promoted agents in the top zone (default 4).
-        #[arg(long, default_value_t = 4)]
+        /// Maximum claude panes visible in the focus zone (default 3 — leaves
+        /// the 4th cell of the 2x2 grid for the shell pane, so spawning a new
+        /// claude never pushes the on-screen pane count above 4).
+        #[arg(long, default_value_t = 3)]
         slots: u32,
 
         #[command(subcommand)]

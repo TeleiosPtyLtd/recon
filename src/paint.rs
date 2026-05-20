@@ -17,24 +17,26 @@ struct Palette {
 fn palette_for(status: &SessionStatus) -> Palette {
     match status {
         // Agent is busy and you aren't reading the pane.
-        // Dim bg, dimmer text — the pane is soft on the eyes, easy to ignore.
+        // Near-black bg with text pushed deep into shadow — the pane sinks
+        // out of focus so your eye glides past it.
         SessionStatus::Working => Palette {
-            bg: Some("#0F1117"),
-            border: "#2A3142",
-            target_contrast: Some(2.5),
+            bg: Some("#03040A"),
+            border: "#1F2536",
+            target_contrast: Some(2.0),
         },
-        // No interaction yet. Neutral; readable.
+        // No interaction yet. Dark, neutral, readable.
         SessionStatus::New => Palette {
-            bg: None,
+            bg: Some("#0F1117"),
             border: "#3D4759",
-            target_contrast: None,
+            target_contrast: Some(4.5),
         },
         // Your turn — reading agent output, composing a reply.
-        // Terminal default everywhere. Border is the only signal.
+        // Noticeably lighter than Working so idle panes visibly rise off the
+        // dashboard surface; crisp fg pulls the eye onto the prompt.
         SessionStatus::Idle => Palette {
-            bg: None,
-            border: "#808080",
-            target_contrast: None,
+            bg: Some("#1C212D"),
+            border: "#9AA3B5",
+            target_contrast: Some(6.5),
         },
         // Human-in-the-loop permission prompt. Warm red bg with high-contrast
         // warm-white fg so the prompt text is unmistakably crisp.
@@ -59,7 +61,32 @@ fn palette_for(status: &SessionStatus) -> Palette {
 ///
 /// Border styling is intentionally not touched here — that's static UI
 /// config, owned by `flow::apply_tmux_config`.
+/// Set a dark default surface on the tmux session containing `pane_target`,
+/// so unpainted panes (shells, editors, the recon dashboard itself) read as
+/// dark instead of inheriting a white terminal background. Per-pane paint
+/// overrides win where set.
+fn ensure_dark_session_default(pane_target: &str) {
+    let Some(session) = pane_target.split(':').next() else { return };
+    let style = "bg=#0F1117,fg=#D0CCC4";
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "window-style", style])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "window-active-style", style])
+        .output();
+}
+
+/// Background RGB for a dashboard row tinted to mirror its pane's paint.
+/// Returns None for statuses that don't get a row tint (New, or statuses
+/// the dashboard chooses to colour itself like Input). Foreground choice is
+/// left to the caller — small-row text wants its own contrast tuning.
+pub fn row_bg(status: &SessionStatus) -> Option<(u8, u8, u8)> {
+    let bg_hex = palette_for(status).bg?;
+    Some(parse_hex(bg_hex))
+}
+
 pub fn paint_pane(pane_target: &str, status: &SessionStatus) {
+    ensure_dark_session_default(pane_target);
     let p = palette_for(status);
     let style = match p.bg {
         Some(bg_hex) => match p.target_contrast {
@@ -92,6 +119,22 @@ pub fn paint_pane(pane_target: &str, status: &SessionStatus) {
     if let Some(window) = window_from_pane(pane_target) {
         unset_window_option(&window, "window-style");
         unset_window_option(&window, "window-active-style");
+    }
+}
+
+/// Mark a pane as running with `--dangerously-skip-permissions`. The marker
+/// is a per-pane tmux user option (`@recon_dangerous`) that flow's
+/// `pane-border-format` references — set = the border shows " ⚠ ", unset =
+/// nothing. Idempotent and cheap to call every refresh.
+pub fn mark_dangerous(pane_target: &str, dangerous: bool) {
+    if dangerous {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-p", "-t", pane_target, "@recon_dangerous", " #[fg=red,bold]⚠#[default] "])
+            .output();
+    } else {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-p", "-u", "-t", pane_target, "@recon_dangerous"])
+            .output();
     }
 }
 
@@ -337,7 +380,7 @@ mod tests {
 
     #[test]
     fn working_fg_hits_target() {
-        let bg = "#0F1117";
+        let bg = "#090B11";
         let fg = pick_fg_hex(bg, 2.5);
         let (br, bg_, bb) = parse_hex(bg);
         let (fr, fg_, fb) = parse_hex(&fg);

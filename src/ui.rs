@@ -7,9 +7,15 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::paint;
 use crate::session::SessionStatus;
 
 pub fn render(frame: &mut Frame, app: &App) {
+    // Paint a dark surface across the whole frame so the dashboard never
+    // inherits a white terminal background.
+    let bg = Block::default().style(Style::default().bg(Color::Rgb(0x0F, 0x11, 0x17)));
+    frame.render_widget(bg, frame.area());
+
     let show_search = app.filter_active || !app.filter_text.is_empty();
     let chunks = if show_search {
         Layout::vertical([
@@ -38,7 +44,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(" # "),
-        Cell::from("Session"),
+        Cell::from("Title"),
         Cell::from("Project"),
         Cell::from("Directory"),
         Cell::from("Status"),
@@ -58,18 +64,47 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(display_idx, &real_idx)| {
             let session = &app.sessions[real_idx];
-            let num = format!(" {} ", real_idx + 1);
 
-            let tmux_name = session
-                .tmux_session
+            // Tmux-active pane: a neon-green ▌ in the # column mirrors the
+            // pane-active-border color used in flow mode, so the dashboard row
+            // matches the green border the user sees on the focused pane.
+            let num_cell = if session.tmux_active {
+                Cell::from(Line::from(vec![
+                    Span::styled("▌", Style::default().fg(Color::Rgb(0x39, 0xFF, 0x14))),
+                    Span::raw(format!("{} ", real_idx + 1)),
+                ]))
+            } else {
+                Cell::from(format!(" {} ", real_idx + 1))
+            };
+
+            // Prefer the pane title (Claude TUI writes a live task summary
+            // there), falling back to the tmux session name for panes that
+            // haven't set one — brand-new claude or non-claude shells.
+            let title_text = session
+                .pane_title
                 .as_deref()
-                .unwrap_or("—");
+                .filter(|t| !t.is_empty())
+                .or(session.tmux_session.as_deref())
+                .unwrap_or("—")
+                .to_string();
 
-            // Status: shape + label + color (layered encoding — don't rely on color alone)
+            // --dangerously-skip-permissions marker: prepend a red warning
+            // glyph so unsupervised panes are unmistakable in the list.
+            let session_cell = if session.dangerous {
+                Cell::from(Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(Color::Rgb(0xE5, 0x3E, 0x3E)).add_modifier(Modifier::BOLD)),
+                    Span::raw(title_text),
+                ]))
+            } else {
+                Cell::from(title_text)
+            };
+
+            // Layered encoding (shape + label + color) so the dashboard is
+            // legible under colorblind palettes and grayscale terminals.
             let (status_dot, status_label, status_color) = match session.status {
-                SessionStatus::New     => ("○", "New",     Color::Rgb(0x3D, 0x47, 0x59)),
-                SessionStatus::Working => ("●", "Working", Color::Rgb(0x4A, 0x55, 0x68)),
-                SessionStatus::Idle    => ("●", "Idle",    Color::Gray),
+                SessionStatus::New     => ("○", "New",     Color::Rgb(0x5A, 0x5A, 0x5E)),
+                SessionStatus::Working => ("●", "Working", Color::Rgb(0xB8, 0xB0, 0xA4)),
+                SessionStatus::Idle    => ("●", "Idle",    Color::Rgb(0xE8, 0xE2, 0xD6)),
                 SessionStatus::Input   => ("▲", "Input",   Color::Rgb(0xDD, 0x6B, 0x20)),
             };
 
@@ -104,7 +139,6 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 Cell::from(Line::from(spans))
             };
 
-            // Status: colored dot + label
             let status_cell = Cell::from(Line::from(vec![
                 Span::styled(status_dot, Style::default().fg(status_color)),
                 Span::styled(
@@ -113,13 +147,12 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             ]));
 
-            // Directory: dimmed
             let dir_cell =
                 Cell::from(cwd_display).style(Style::default().fg(Color::DarkGray));
 
             let row = Row::new(vec![
-                Cell::from(num),
-                Cell::from(tmux_name.to_string()),
+                num_cell,
+                session_cell,
                 project_cell,
                 dir_cell,
                 status_cell,
@@ -128,23 +161,42 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 Cell::from(activity),
             ]);
 
-            // Row tint matches the tmux pane paint so the dashboard and the
-            // panes you're switching between speak the same visual language.
+            // Row tint mirrors the per-pane palette in paint.rs so the
+            // dashboard and the panes you switch between speak the same
+            // visual language. Working rows sink (near-black bg, dim base
+            // fg); Idle rows rise (lighter bg, crisp base fg). Cells with
+            // their own explicit fg (status dot, branch, token warnings)
+            // keep their colour on top of the row base.
+            //
+            // Precedence: Input (red-warm) > Selected (blue tint) > status,
+            // so attention-demanding panes always win the eye.
             if session.status == SessionStatus::Input {
                 row.style(Style::default().bg(Color::Rgb(0x2D, 0x1F, 0x10)))
             } else if display_idx == app.selected {
                 row.style(Style::default().bg(Color::Rgb(0x2E, 0x31, 0x48)))
             } else {
-                row
+                // bg mirrors the pane paint (single source of truth in paint.rs).
+                // fg is dashboard-local — smaller text wants its own contrast.
+                let fg = match session.status {
+                    SessionStatus::Working => Some(Color::Rgb(0x3A, 0x3E, 0x47)),
+                    SessionStatus::Idle => Some(Color::Rgb(0xD8, 0xDA, 0xE2)),
+                    _ => None,
+                };
+                match (paint::row_bg(&session.status), fg) {
+                    (Some((r, g, b)), Some(fg)) => {
+                        row.style(Style::default().bg(Color::Rgb(r, g, b)).fg(fg))
+                    }
+                    _ => row,
+                }
             }
         })
         .collect();
 
     let widths = [
         Constraint::Length(4),   // #
-        Constraint::Length(16),  // Session
-        Constraint::Min(20),    // Project (repo + branch)
-        Constraint::Length(20), // Directory
+        Constraint::Min(20),     // Title (Claude's live task summary, varies in length)
+        Constraint::Length(22),  // Project (repo + branch)
+        Constraint::Length(20),  // Directory
         Constraint::Length(10), // Status
         Constraint::Length(20), // Model
         Constraint::Length(14), // Context

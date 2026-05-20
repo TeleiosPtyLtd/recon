@@ -62,6 +62,7 @@ impl App {
 
         for s in &sessions {
             let Some(pane) = s.pane_target.as_deref() else { continue };
+            let first_paint = !self.last_painted.contains_key(pane);
             let changed = self
                 .last_painted
                 .get(pane)
@@ -69,6 +70,11 @@ impl App {
             if changed {
                 paint::paint_pane(pane, &s.status);
                 self.last_painted.insert(pane.to_string(), s.status.clone());
+            }
+            // Mark the pane on first sight — `dangerous` is fixed for the
+            // pane's lifetime, so no need to refresh it on every status flip.
+            if first_paint {
+                paint::mark_dangerous(pane, s.dangerous);
             }
         }
         let live: std::collections::HashSet<&str> =
@@ -472,6 +478,7 @@ impl App {
                     "last_activity": s.last_activity,
                     "started_at": s.started_at,
                     "tags": s.tags,
+                    "dangerous": s.dangerous,
                 })
             })
             .collect();

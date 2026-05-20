@@ -379,6 +379,11 @@ pub fn resolve_zoom(app: &mut App) {
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
+    // Paint a dark surface across the whole frame so the view never inherits
+    // a white terminal background.
+    let bg = Block::default().style(Style::default().bg(Color::Rgb(0x0F, 0x11, 0x17)));
+    frame.render_widget(bg, frame.area());
+
     let show_search = app.filter_active || !app.filter_text.is_empty();
     let chunks = if show_search {
         Layout::vertical([
@@ -563,17 +568,25 @@ fn render_character(frame: &mut Frame, session: &Session, area: Rect, tick: u64,
     let sprite_lines = render_sprite_lines(sprite, palette);
     lines.extend(sprite_lines);
 
-    // Session name
+    // Session name (with ⚠ marker when --dangerously-skip-permissions is set)
     let name = session.tmux_session.as_deref().unwrap_or("???");
     let name_style = if is_selected {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
-    lines.push(Line::from(Span::styled(
-        truncate_str(name, area.width as usize),
-        name_style,
-    )));
+    if session.dangerous {
+        let display = truncate_str(name, area.width.saturating_sub(2) as usize);
+        lines.push(Line::from(vec![
+            Span::styled("⚠ ", Style::default().fg(Color::Rgb(0xE5, 0x3E, 0x3E)).add_modifier(Modifier::BOLD)),
+            Span::styled(display, name_style),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            truncate_str(name, area.width as usize),
+            name_style,
+        )));
+    }
 
     // Git branch
     let branch = session.branch.as_deref().unwrap_or("");
@@ -693,6 +706,9 @@ mod tests {
             jsonl_path: PathBuf::new(),
             last_file_size: 0,
             tags: std::collections::HashMap::new(),
+            dangerous: false,
+            tmux_active: false,
+            pane_title: None,
         }
     }
 

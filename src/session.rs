@@ -97,6 +97,11 @@ pub struct Session {
     pub relative_dir: Option<String>,
     pub tmux_session: Option<String>,
     pub pane_target: Option<String>,
+    /// `#{pane_title}` from tmux — Claude TUI writes a live one-liner of what
+    /// it's doing here (e.g. "✳ Review business cases"). Empty for panes that
+    /// haven't set one. Discovery refreshes this each tick so the dashboard
+    /// can show it as the primary identifier.
+    pub pane_title: Option<String>,
     pub model: Option<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
@@ -108,6 +113,10 @@ pub struct Session {
     pub jsonl_path: PathBuf,
     pub last_file_size: u64,
     pub tags: HashMap<String, String>,
+    pub dangerous: bool,
+    /// True when this pane is the active pane in its window AND the window is
+    /// active in its session — i.e. the one tmux would land on when attaching.
+    pub tmux_active: bool,
 }
 
 impl Session {
@@ -299,6 +308,9 @@ pub fn discover_sessions(prev_sessions: &HashMap<String, Session>) -> Vec<Sessio
                 jsonl_path: path,
                 last_file_size: info.file_size,
                 tags,
+                dangerous: live.dangerous,
+                tmux_active: live.tmux_active,
+                pane_title: live.pane_title.clone(),
             });
         }
     }
@@ -394,6 +406,9 @@ pub fn discover_sessions(prev_sessions: &HashMap<String, Session>) -> Vec<Sessio
                 jsonl_path: path,
                 last_file_size: info.file_size,
                 tags,
+                dangerous: live.dangerous,
+                tmux_active: live.tmux_active,
+                pane_title: live.pane_title.clone(),
             });
         } else {
             // No JSONL found — brand-new session, show as New placeholder
@@ -418,6 +433,9 @@ pub fn discover_sessions(prev_sessions: &HashMap<String, Session>) -> Vec<Sessio
                 jsonl_path: PathBuf::new(),
                 last_file_size: 0,
                 tags,
+                dangerous: live.dangerous,
+                tmux_active: live.tmux_active,
+                pane_title: live.pane_title.clone(),
             });
         }
     }
@@ -446,6 +464,9 @@ struct LiveSessionInfo {
     pane_target: String,
     pane_cwd: String,
     started_at: u64,
+    dangerous: bool,
+    tmux_active: bool,
+    pane_title: Option<String>,
 }
 
 /// Build a map from JSONL session_id → live session info.
@@ -458,7 +479,8 @@ fn build_live_session_map() -> HashMap<String, LiveSessionInfo> {
     let tmux_panes = discover_claude_tmux_panes();
 
     let mut map = HashMap::new();
-    for (pid, tmux_session, pane_target, pane_cwd) in tmux_panes {
+    for (pid, tmux_session, pane_target, pane_cwd, tmux_active, pane_title) in tmux_panes {
+        let dangerous = pid_has_dangerous_flag(pid);
         if let Some(info) = pid_session_map.get(&pid) {
             map.insert(
                 info.session_id.clone(),
@@ -468,25 +490,44 @@ fn build_live_session_map() -> HashMap<String, LiveSessionInfo> {
                     pane_target,
                     pane_cwd,
                     started_at: info.started_at,
+                    dangerous,
+                    tmux_active,
+                    pane_title,
                 },
             );
         } else {
             // Tmux pane running claude but no session file yet (just started).
             // Use pane_target (not tmux session name) as placeholder key so that
             // two Claude panes in the same tmux session don't collide.
+            let placeholder_key = format!("tmux-{pane_target}");
             map.insert(
-                format!("tmux-{pane_target}"),
+                placeholder_key,
                 LiveSessionInfo {
                     pid,
                     tmux_session,
                     pane_target,
                     pane_cwd,
                     started_at: 0,
+                    dangerous,
+                    tmux_active,
+                    pane_title,
                 },
             );
         }
     }
     map
+}
+
+/// Detect `--dangerously-skip-permissions` on the claude process command line.
+fn pid_has_dangerous_flag(pid: i32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+    else {
+        return false;
+    };
+    let args = String::from_utf8_lossy(&output.stdout);
+    args.split_whitespace().any(|a| a == "--dangerously-skip-permissions")
 }
 
 #[derive(Debug)]
@@ -1040,16 +1081,27 @@ fn determine_status(_path: &Path, input_tokens: u64, output_tokens: u64, pane_ta
     }
 }
 
-/// Determine status by inspecting the Claude Code TUI pane content.
+/// Determine status by inspecting the Claude Code TUI status bar.
 ///
-/// Scans the last few non-empty lines bottom-up looking for:
-///   - Working: a line starting with a Unicode spinner (✽✢✳✶⏺) that also
-///     contains "…" — these are thinking/tool-execution progress indicators
-///   - Input: "Esc to cancel" on the last line, or a selection menu ("❯ N.")
-///   - Idle: anything else
+/// The very last non-empty line of the pane is Claude's status affordance:
+///   "… esc to interrupt …" → agent is processing/streaming → Working
+///   "Esc to cancel"         → permission prompt waiting on user → Input
+///   anything else           → Idle
+///
+/// We deliberately do NOT key off the animated spinner glyph. Claude TUI
+/// cycles its spinner through frames that include glyphs outside any
+/// stable unicode range, so capture-pane sometimes lands on a non-matching
+/// frame and the status flickers Working⇄Idle every poll. The bottom
+/// status text is stable — it stays present for the entire duration of a
+/// processing turn — so it gives a deterministic Working signal that
+/// doesn't churn the paint code (which re-renders the pane on every
+/// status flip and visibly interrupts Claude TUI's own animation).
 fn pane_status(pane_target: &str) -> SessionStatus {
+    // `-S -10` starts the capture 10 lines from the bottom of the visible
+    // region; we only ever scan that far up anyway. Avoids streaming
+    // hundreds of lines of scrollback per pane every 200ms in flow mode.
     let output = match std::process::Command::new("tmux")
-        .args(["capture-pane", "-t", pane_target, "-p"])
+        .args(["capture-pane", "-t", pane_target, "-p", "-S", "-10"])
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -1065,20 +1117,19 @@ fn pane_status(pane_target: &str) -> SessionStatus {
             continue;
         }
 
-        // Input: permission prompt on the very last non-empty line
-        if lines_checked == 0 && trimmed.contains("Esc to cancel") {
-            return SessionStatus::Input;
-        }
-
-        // Working: line starts with a spinner character and contains "…"
-        // Spinners: ✽(U+273D) ✢(U+2722) ✳(U+2733) ✶(U+2736) ⏺(U+23FA)
-        if let Some(first) = trimmed.chars().next() {
-            if is_spinner(first) && trimmed.contains('\u{2026}') {
+        // Status bar is always the very last non-empty line.
+        if lines_checked == 0 {
+            if trimmed.contains("esc to interrupt") {
                 return SessionStatus::Working;
+            }
+            if trimmed.contains("Esc to cancel") {
+                return SessionStatus::Input;
             }
         }
 
-        // Input: selection-style permission prompts ("❯ N.")
+        // Selection-style permission prompts use "❯ N." (arrow + digit),
+        // e.g. " ❯ 2. Yes, and don't ask again for docs.asciinema.org".
+        // These render a few lines above the status bar.
         if let Some(pos) = trimmed.find('\u{276F}') { // ❯
             let after = trimmed[pos + '\u{276F}'.len_utf8()..].trim_start();
             if after.starts_with(|c: char| c.is_ascii_digit()) {
@@ -1087,23 +1138,15 @@ fn pane_status(pane_target: &str) -> SessionStatus {
         }
 
         lines_checked += 1;
+        // 10 covers the status line, separators, prompt box, and a few
+        // lines of selection-menu options above it. Anything further up
+        // is conversation content, not status.
         if lines_checked >= 10 {
             break;
         }
     }
 
     SessionStatus::Idle
-}
-
-/// Check if a character is a Claude Code activity indicator.
-/// Covers dingbat spinners (✽✢✳✶✻ etc.), record symbol (⏺),
-/// and middle dot (·) used for progress lines.
-fn is_spinner(c: char) -> bool {
-    matches!(c,
-        '\u{2720}'..='\u{2767}' | // Dingbats: ✽✢✳✶✻✺✴✵ etc.
-        '\u{23FA}'              | // ⏺ (record)
-        '\u{00B7}'                // · (middle dot, used for progress)
-    )
 }
 
 // --- Live session discovery ---
@@ -1155,14 +1198,18 @@ fn read_pid_session_map() -> HashMap<i32, SessionFileInfo> {
 }
 
 /// Get tmux panes running claude.
-/// Returns Vec<(pid, session_name, pane_cwd)>.
-fn discover_claude_tmux_panes() -> Vec<(i32, String, String, String)> {
+/// Returns Vec<(pid, session_name, pane_target, pane_cwd, tmux_active, pane_title)>,
+/// where `tmux_active` is true iff this is the active pane in its window
+/// AND the window is active in its session — i.e. the pane tmux would
+/// land on when attaching to that session. `pane_title` is None when tmux
+/// returns an empty string (e.g. brand-new pane before any program has set OSC 2).
+fn discover_claude_tmux_panes() -> Vec<(i32, String, String, String, bool, Option<String>)> {
     let output = match std::process::Command::new("tmux")
         .args([
             "list-panes",
             "-a",
             "-F",
-            "#{pane_pid}|||#{session_name}|||#{pane_current_command}|||#{pane_current_path}|||#{window_index}|||#{pane_index}",
+            "#{pane_pid}|||#{session_name}|||#{pane_current_command}|||#{pane_current_path}|||#{window_index}|||#{pane_index}|||#{pane_active}|||#{window_active}|||#{pane_title}",
         ])
         .output()
     {
@@ -1175,10 +1222,14 @@ fn discover_claude_tmux_panes() -> Vec<(i32, String, String, String)> {
     let sessions_dir = dirs::home_dir()
         .map(|h| h.join(".claude").join("sessions"))
         .unwrap_or_default();
+    // Built lazily on first need: most discovery cycles either find every
+    // pane via the direct-PID hit (recon-launched panes are claude.exe at
+    // pane_pid) or hit zero claude panes. Either way, no `ps -ax` runs.
+    let mut children: Option<HashMap<i32, Vec<i32>>> = None;
 
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(6, "|||").collect();
-        if parts.len() < 6 {
+        let parts: Vec<&str> = line.splitn(9, "|||").collect();
+        if parts.len() < 9 {
             continue;
         }
         let pid: i32 = match parts[0].parse() {
@@ -1190,12 +1241,12 @@ fn discover_claude_tmux_panes() -> Vec<(i32, String, String, String)> {
         let pane_path = parts[3];
         let window_index = parts[4];
         let pane_index = parts[5];
+        let tmux_active = parts[6] == "1" && parts[7] == "1";
+        let pane_title = parts[8];
 
         // Claude shows up as a version number (e.g. "2.1.76") or "claude" or "node".
         // On macOS, the npm-distributed binary's internal process name is "claude.exe"
         // (a bundler convention, not a Windows artifact), so tmux reports that instead.
-        // If another binary name surfaces, consider switching to a `starts_with("claude")`
-        // match as a general case.
         let is_claude = command
             .chars()
             .next()
@@ -1205,42 +1256,85 @@ fn discover_claude_tmux_panes() -> Vec<(i32, String, String, String)> {
             || command == "claude.exe"
             || command == "node";
 
-        if is_claude {
-            // pane_pid is the initial process — it may be claude itself (recon launch)
-            // or a shell with claude as the foreground child (manual `claude` in a terminal).
-            // Try the pane PID first, fall back to searching children.
-            let claude_pid = if sessions_dir.join(format!("{pid}.json")).exists() {
+        let claude_pid = if is_claude {
+            if sessions_dir.join(format!("{pid}.json")).exists() {
                 Some(pid)
             } else {
-                find_claude_child_pid(pid)
-            };
-            if let Some(cpid) = claude_pid {
-                let pane_target = format!("{session_name}:{window_index}.{pane_index}");
-                results.push((cpid, session_name.to_string(), pane_target, pane_path.to_string()));
+                let map = children.get_or_insert_with(build_children_map);
+                find_claude_child_pid(pid, map, &sessions_dir)
             }
         } else if command == "bash" || command == "sh" || command == "zsh" {
-            if let Some(claude_pid) = find_claude_child_pid(pid) {
-                let pane_target = format!("{session_name}:{window_index}.{pane_index}");
-                results.push((claude_pid, session_name.to_string(), pane_target, pane_path.to_string()));
-            }
+            let map = children.get_or_insert_with(build_children_map);
+            find_claude_child_pid(pid, map, &sessions_dir)
+        } else {
+            None
+        };
+
+        if let Some(cpid) = claude_pid {
+            let pane_target = format!("{session_name}:{window_index}.{pane_index}");
+            let title = if pane_title.is_empty() { None } else { Some(pane_title.to_string()) };
+            results.push((
+                cpid,
+                session_name.to_string(),
+                pane_target,
+                pane_path.to_string(),
+                tmux_active,
+                title,
+            ));
         }
     }
 
     results
 }
 
-/// Check if a shell process has a claude child by looking for a child PID
-/// that has a corresponding ~/.claude/sessions/{PID}.json file.
-fn find_claude_child_pid(parent_pid: i32) -> Option<i32> {
-    let sessions_dir = dirs::home_dir()?.join(".claude").join("sessions");
-    let output = std::process::Command::new("pgrep")
-        .args(["-P", &parent_pid.to_string()])
+/// Build a PPID → [child PIDs] map by parsing `ps -ax`. Called at most once
+/// per discovery cycle (lazily, only when a pane needs the child-PID search).
+fn build_children_map() -> HashMap<i32, Vec<i32>> {
+    let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,ppid="])
         .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<i32>().ok())
-        .find(|pid| sessions_dir.join(format!("{pid}.json")).exists())
+    else { return map };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let pid = parts.next().and_then(|s| s.parse::<i32>().ok());
+        let ppid = parts.next().and_then(|s| s.parse::<i32>().ok());
+        if let (Some(pid), Some(ppid)) = (pid, ppid) {
+            map.entry(ppid).or_default().push(pid);
+        }
+    }
+    map
+}
+
+/// BFS the descendant process tree of `parent_pid` looking for the first PID
+/// with a `~/.claude/sessions/{PID}.json`. Resolves a tmux pane's `pane_pid`
+/// (which may be a shell wrapper) to the actual claude PID owning the JSONL
+/// transcript.
+///
+/// Walks descendants rather than checking direct children only because some
+/// panes wrap claude two levels deep (`sh -c while true; ${SHELL}; done` →
+/// zsh → claude). Uses a shared PPID→children map to avoid re-scanning the
+/// process table for every pane in a discovery cycle. Avoids `pgrep -P`
+/// because macOS BSD pgrep excludes the calling process's ancestor chain —
+/// when recon runs inside a claude pane, `pgrep -P <parent_zsh>` returns
+/// nothing because claude is recon's ancestor.
+fn find_claude_child_pid(
+    parent_pid: i32,
+    children: &HashMap<i32, Vec<i32>>,
+    sessions_dir: &std::path::Path,
+) -> Option<i32> {
+    let mut visited: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut queue: Vec<i32> = children.get(&parent_pid).cloned().unwrap_or_default();
+    while let Some(pid) = queue.pop() {
+        if !visited.insert(pid) { continue; }
+        if sessions_dir.join(format!("{pid}.json")).exists() {
+            return Some(pid);
+        }
+        if let Some(grandkids) = children.get(&pid) {
+            queue.extend(grandkids);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
