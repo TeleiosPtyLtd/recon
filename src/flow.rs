@@ -744,9 +744,13 @@ impl Orchestrator {
             }
         }
 
-        // claude_panes is stable across the promote loop and the opportunistic
-        // shell-spawn block below — `sessions` doesn't mutate within a tick.
-        let claude_panes: std::collections::HashSet<String> = sessions.iter()
+        // claude_panes tracks which focus-zone positions currently hold a
+        // claude. Starts from start-of-tick `sessions`; promote/demote within
+        // this same tick mutate it so the shell-guarantee block below sees
+        // up-to-date occupancy. Without that update, shell-guarantee can
+        // `respawn-pane -k` a slot a same-tick promote just landed a claude
+        // in — killing the claude.
+        let mut claude_panes: std::collections::HashSet<String> = sessions.iter()
             .filter_map(|s| s.pane_target.clone())
             .filter(|t| is_in_focus_zone(&self.master, t))
             .collect();
@@ -791,6 +795,13 @@ impl Orchestrator {
                 // `recon flow stop` tidies orphan windows.
                 occupied += 1;
                 layout_dirty = true;
+                // Keep claude_panes in sync within the tick: `slot` (focus
+                // zone) now holds the just-promoted claude. The shell-
+                // guarantee block below filters placeholder candidates with
+                // `!claude_panes.contains(p)`; without this insert it would
+                // treat `slot` as a placeholder and `respawn-pane -k` the
+                // claude we just put there.
+                claude_panes.insert(slot.clone());
                 println!(
                     "[promote] {} ({}) → {}",
                     short_id(&s.session_id),
@@ -1258,7 +1269,20 @@ fn split_placeholder(args_before_cmd: &[&str]) -> Option<String> {
 /// Replace the process inside an existing pane with the shell-respawn loop
 /// and tag it as the shell pane. Used by the orchestrator to opportunistically
 /// fill a free placeholder slot with the always-available terminal.
+///
+/// Defensive: re-query `pane_current_command` before respawning. `-k` kills
+/// whatever runs in the pane, so if a same-tick promote (or a TOCTOU racy
+/// user action) parked a claude at `target` between snapshot and now, the
+/// respawn would silently kill the claude. Refuse instead.
 fn convert_placeholder_to_shell(target: &str) -> bool {
+    let cmd = pane_command(target).unwrap_or_default();
+    if looks_like_claude_cmd(&cmd) {
+        eprintln!(
+            "[convert_placeholder_to_shell] refusing — {} holds claude (`{}`), not a placeholder",
+            target, cmd,
+        );
+        return false;
+    }
     let cmd = shell_respawn_cmd();
     let ok = Command::new("tmux")
         .args(["respawn-pane", "-k", "-t", target, "sh", "-c", &cmd])
@@ -1273,7 +1297,19 @@ fn convert_placeholder_to_shell(target: &str) -> bool {
 
 /// Inverse of `convert_placeholder_to_shell`. Loses shell scrollback —
 /// acceptable since shell is ephemeral / re-creatable from any slot.
+///
+/// Defensive: same TOCTOU guard as `convert_placeholder_to_shell`. The shell
+/// role tag is set at snapshot time, but a user can `exec claude` inside the
+/// shell between snapshot and yield — `-k` would then kill that claude.
 fn convert_shell_to_placeholder(target: &str) -> bool {
+    let cmd = pane_command(target).unwrap_or_default();
+    if looks_like_claude_cmd(&cmd) {
+        eprintln!(
+            "[convert_shell_to_placeholder] refusing — {} holds claude (`{}`), not a shell",
+            target, cmd,
+        );
+        return false;
+    }
     let ok = Command::new("tmux")
         .args(["respawn-pane", "-k", "-t", target, "sh", "-c", PLACEHOLDER_CMD])
         .status()
