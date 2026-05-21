@@ -1,12 +1,70 @@
 # recon
 
-A tmux-native dashboard for managing [Claude Code](https://claude.ai/claude-code) agents.
+A tmux-native cockpit for running many [Claude Code](https://claude.ai/claude-code) agents in parallel.
 
-Run multiple Claude Code sessions in tmux, then manage them all without ever leaving the terminal — see what each agent is working on, which ones need your attention, switch between them, kill or spawn new ones, and resume past sessions. All from a single keybinding.
+The headline mode is **flow** — one tmux session, a 2×2 grid of live agent panes on top, a dashboard underneath. Agents that need your attention are auto-promoted into the grid; Working agents quietly demote to background windows once they're heads-down. You stay in one window and the cockpit reshapes itself around what needs you.
 
 ![recon demo](assets/demo.gif)
 
-## Views
+## Flow
+
+```
+┌─ tmux session: recon-flow ──────────────────────────────────────────────┐
+│  [1] api-refactor      ⚠            │  [2] debug-pipeline               │
+│  ● Input — waiting on you           │  ● Working — streaming response    │
+│                                     │                                    │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  [3] write-tests                    │  [4] recon-shell                  │
+│  ● Idle — done, waiting             │  $ _                              │
+│                                     │                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│  [0] recon-dashboard                                                    │
+│   #  Session          Status   Model      Context   Last Active         │
+│   1  api-refactor     ● Input  Opus 4.6   45k/1M    2m ago              │
+│   2  debug-pipeline   ● Work   Sonnet 4.6 12k/200k  < 1m                │
+│   3  write-tests      ● Idle   Haiku 4.5  8k/200k   < 1m                │
+│   …                                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What it does**
+
+- **Sticky 2×2 focus zone.** Up to 3 Claude panes share the top zone alongside a shell; an agent stays put while Working — only displaced when something else needs attention and the grid is full.
+- **Auto-promote / auto-demote.** Idle or Input agents living in background `bg-<id>` windows are promoted into a free slot. Working agents that have been heads-down for 30s+ are demoted out to make room.
+- **Dashboard at the bottom.** Pinned 9 rows tall, runs the standard recon table in a respawn loop. Quit it with `q` and it restarts; the orchestrator never loses sight of the grid.
+- **Dark theme + neon-green active border** so the focused slot is unmistakable across a wide monitor.
+- **⚠ dangerous marker** in the pane title for agents launched with `--dangerously-skip-permissions`.
+- **Graceful shutdown.** `recon flow stop` break-panes every Claude out to its own `bg-<id>` tmux session so your work survives — pass `--force` to kill them.
+
+**Setup**
+
+```bash
+cargo install --path .   # puts `recon` on PATH
+recon flow               # creates tmux session 'recon-flow' and attaches
+```
+
+That's it — `recon flow` is idempotent. First run creates the session, splits the focus grid, spawns the orchestrator in a hidden window, and attaches. Re-running heals any missing pieces (e.g. if you killed the orchestrator pane) and re-attaches.
+
+```bash
+recon flow --slots 3     # cap Claude panes in the grid (default 3, leaves 1 cell for shell)
+recon flow status        # diagnose: windows, panes, orchestrator status
+recon flow stop          # graceful shutdown — preserves Claude work as bg-* sessions
+recon flow stop --force  # kill all Claude processes too
+```
+
+**Spatial pane keys** (active only inside `recon-flow`, so they don't intercept typing elsewhere):
+
+```
+[Alt+4 top-left ][Alt+5 top-right]
+[Alt+1 btm-left ][Alt+2 btm-right]
+[        Alt+0 dashboard         ]
+```
+
+The bindings use tmux directional pane tokens (`{top-left}`, `{bottom}`), so they survive any future layout reshuffle.
+
+**Spawning a new agent inside flow:** focus the shell pane (Alt+anything that lands on it), run `claude` (or `recon launch --attach`). It immediately joins the rotation — the orchestrator picks it up on the next tick.
+
+## Other Views
 
 ### Tamagotchi View (`recon view` or press `v`)
 
@@ -98,6 +156,9 @@ Requires tmux and [Claude Code](https://claude.ai/claude-code).
 ## Usage
 
 ```bash
+recon flow                                   # Focus-zone cockpit (the headline mode)
+recon flow status                            # Diagnose recon-flow
+recon flow stop                              # Graceful shutdown (preserves Claude work)
 recon                                        # Table dashboard
 recon view                                   # Tamagotchi visual dashboard
 recon json                                   # JSON output (for scripting)
